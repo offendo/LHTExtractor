@@ -135,11 +135,11 @@ if __name__ == "__main__":
     def extract_file(path: Path):
         trace = TracedFile.from_file(path)
         for name, thm in trace.format_theorems().items():
-            output_name = Path(args.output_dir, path.with_name(f"{path.stem}-{name}.json").relative_to(args.extraction_dir))
+            output_name = Path(args.output_dir, path.with_name(f"{path.stem}-{name}.lean").relative_to(args.extraction_dir))
             Path(output_name).parent.mkdir(parents=True, exist_ok=True)
             with open(output_name, 'w') as f:
                 f.write(thm)
 
-    pbar = tqdm(list(Path(args.extraction_dir).rglob('*.json')))
+    pbar = tqdm(Path(args.extraction_dir).rglob('*.json'))
     with Pool(args.jobs) as pool:
         pool.map(extract_file, pbar)
