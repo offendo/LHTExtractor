@@ -2,6 +2,8 @@ import pandas as pd
 import json
 import re
 import sys
+import time
+from collections import deque
 from tqdm import tqdm
 from argparse import ArgumentParser
 from multiprocessing import Pool
@@ -11,19 +13,24 @@ from pathlib import Path
 
 @dataclass
 class Namespace:
+    kind: str
     name: str
     start: int
     end: int | None = None
 
     @classmethod
     def from_nodes(cls, start_node: dict, end_node: dict | None = None):
-        name = start_node['node']['info']['command']['stx']['stx']
+        # Remove 'scoped', which might cause problems but idk
+        name = start_node['node']['info']['command']['stx']['stx'].replace('scoped', '')
         start = start_node['node']['info']['command']['stx']['start']['line']
         if end_node:
             end = end_node['node']['info']['command']['stx']['start']['line']
         else:
             end = sys.maxsize
         return cls(name, start, end)
+
+    def __iter__(self):
+        yield from (self.kind, self.name, self.start)
 
 class Section(Namespace):
     ...
@@ -58,42 +65,82 @@ class TracedFile:
 
     @staticmethod
     def get_namespaces(info_tree: list[dict]):
-        # For the newly declared namespaces, they are closeable, so we have to find the appropriate `end ...` indicator.
-        new_namespaces = {
-            node['node']['info']['command']['stx']['stx'].replace('namespace', '', 1).strip().split('.')[-1]: node 
-            for node in info_tree 
-            if node['node']['info']['command']['elaborator'] == 'Lean.Elab.Command.elabNamespace'
-        }
-        ends = {
-            node['node']['info']['command']['stx']['stx'].replace('end', '', 1).strip().split('.')[-1]: node 
-            for node in info_tree 
-            if node['node']['info']['command']['elaborator'] == 'Lean.Elab.Command.elabEnd'
-            and node['node']['info']['command']['stx']['stx'] != 'end' # don't include things that are just 'end'
-        }
-        namespaces = [Namespace.from_nodes(node, ends[name]) for name, node in new_namespaces.items() if name in ends]
+        namespaces = []
+        sections = []
+        stack = deque([])
 
-        # Get a list of the ones that are just `open ...`
-        opens_unfiltered = [Namespace.from_nodes(node) for node in info_tree if node['node']['info']['command']['elaborator'] == 'Lean.Elab.Command.elabOpen']
+        for node in info_tree:
+            command = node['node']['info']['command']
+            # Step one, get rid of the comments
+            stx = command['stx']['stx'].split('--')[0].split('/-')[0]
+            match command['elaborator']:
+                # namespaces must have an associated name, so you can't just have `namespace...end`
+                # However, you can have `namespace Apple.Banana.Cherry...end Cherry...end Banana...end Apple`
+                # which essentially defines three nested namespaces at once. You can also close multiple at 
+                # once, e.g., namespace Apple.Banana.Cherry...end Cherry...end Apple.Banana.
+                case 'Lean.Elab.Command.elabNamespace':
+                    names = stx.replace('namespace', '', 1).strip().split('.')
+                    start = command['stx']['start']['line']
+                    for i, n in enumerate(names):
+                        stack.append(("namespace", n, start + (i / 100))) # add 1/100 to keep the hierarchy
+                case 'Lean.Elab.Command.elabSection' | 'Lean.Elab.Command.elabNonComputableSection':
+                    names = stx.replace('section', '', 1).replace('noncomputable', '', 1).strip().split('.')
+                    start = command['stx']['start']['line']
+                    # Sections sometimes have no name. Just push it on the stack anyway
+                    if len(names) == 0:
+                        stack.append(("", start))
+                    for n in names:
+                        stack.append(("noncomputable section" if 'noncomputable' in stx else 'section', n, start))
+                case 'Lean.Elab.Command.elabOpen':
+                    names = re.split(r"[\. ]", stx.replace('open', '', 1).replace('scoped', '', 1).strip())
+                    start = command['stx']['start']['line']
+                    for i, n in enumerate(names):
+                        if 'scoped' in stx:
+                            stack.append(("open scoped", n, start + (i / 100))) # add 1/100 to keep the hierarchy
+                        else:
+                            stack.append(("open", n, start + (i / 100))) # add 1/100 to keep the hierarchy
+                case 'Lean.Elab.Command.elabEnd':
+                    # Finally, we've come to the end of a block. Now we need to keep popping from the stack until we reach the corresponding open.
+                    names = stx.replace('end', '', 1).strip().split('.')
+                    end = command['stx']['start']['line']
+                    if len(names) == 0:
+                        names = [""]
 
-        # Now, loop through the namespace...end and section...end blocks, and see if this open falls inside one of them.
-        # If it does, update the end index of the "open" to the end index of the block
-        section_starts = {
-            node['node']['info']['command']['stx']['stx'].replace('section', '', 1).strip().split('.')[-1]: node 
-            for node in info_tree if node['node']['info']['command']['elaborator'] == 'Lean.Elab.Command.elabSection'
-            and node['node']['info']['command']['stx']['stx'] != 'section' # don't include things that are just 'section'
-        }
-        sections = [Section.from_nodes(node, ends[name]) for name, node in section_starts.items() if name and not name.startswith('--') and name in ends]
-        opens = []
-        for op in opens_unfiltered:
-            new_open = op
-            block_size = sys.maxsize
-            for sec in sections + namespaces:
-                if (sec.start < op.start < sec.end) and (sec.end - sec.start < block_size):
-                    new_open = Namespace(op.name, op.start, sec.end)
-            opens.append(new_open)
-
-        # Return a list of 
-        return opens + namespaces
+                    # Loop through the names in reverse, checking to see if we've found a match at each pop
+                    counter = 0
+                    for n in names[::-1]:
+                        while stack:
+                            kind, name, start = stack.pop()
+                            if kind == 'open':
+                                namespaces.append(Namespace(kind, name, start, end))
+                                counter += 1
+                            elif kind == 'open scoped':
+                                namespaces.append(Namespace(kind, name, start, end))
+                                counter += 1
+                            elif kind == 'section' or kind == 'noncomputable section':
+                                # We've found the opener for this name, can continue with the loop
+                                if name == n:
+                                    sections.append(Section(kind, name, start, end))
+                                    break
+                                else:
+                                    raise Exception(f"Found malformed block at: {kind}\t{name}!={n}\t{start}\t{end}\n\n{stack}")
+                            elif kind == 'namespace':
+                                # We've found the opener for this name, can continue with the loop
+                                if name == n:
+                                    namespaces.append(Namespace(kind, name, start, end))
+                                    break
+                                else:
+                                    # Normally this would be impossible, but turns out some sections can be started as a sub-block of another. E.g., "... in section...end"
+                                    # So it's probably the "end" block of one of those sections. For now, just put the namespace back on the stack and keep going
+                                    stack.append((kind, name, start))
+                                    for i in range(counter):
+                                        stack.append(tuple(namespaces.pop()))
+                                    break
+        # Add on all the remaining unclosed namespaces/opens
+        for kind,name,start in stack:
+            if kind in {'open', 'open scoped', 'namespace'}:
+                namespaces.append(Namespace(kind, name, start, sys.maxsize))
+        return namespaces
 
     
     def get_open_namespaces(self, thm: dict):
@@ -101,7 +148,7 @@ class TracedFile:
         opens = []
         for ns in self.namespaces:
             if ns.start < sline < ns.end:
-                opens.append(ns.name)
+                opens.append(f"{ns.kind} {ns.name}")
         return opens
 
     def format_theorems(self):
@@ -135,11 +182,12 @@ if __name__ == "__main__":
     def extract_file(path: Path):
         trace = TracedFile.from_file(path)
         for name, thm in trace.format_theorems().items():
-            output_name = Path(args.output_dir, path.with_name(f"{path.stem}-{name}.lean").relative_to(args.extraction_dir))
+            clean_name = name.replace("'", "_p")
+            output_name = Path(args.output_dir, path.with_name(f"{path.stem}-{clean_name}.lean").relative_to(args.extraction_dir))
             Path(output_name).parent.mkdir(parents=True, exist_ok=True)
             with open(output_name, 'w') as f:
                 f.write(thm)
 
-    pbar = tqdm(Path(args.extraction_dir).rglob('*.json'))
+    pbar = tqdm(list(Path(args.extraction_dir).rglob('*.json')))
     with Pool(args.jobs) as pool:
         pool.map(extract_file, pbar)
