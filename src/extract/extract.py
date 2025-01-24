@@ -140,29 +140,30 @@ class TracedFile:
         for kind,name,start in stack:
             if kind in {'open', 'open scoped', 'namespace'}:
                 namespaces.append(Namespace(kind, name, start, sys.maxsize))
-        return namespaces
+        return sorted(namespaces, key=lambda x: x.start)
 
     
     def get_open_namespaces(self, thm: dict):
         (sline, scol), (eline, ecol) = thm['sourceRange']
         opens = []
-        for ns in self.namespaces:
+        for ns in sorted(self.namespaces, key=lambda x: x.start):
             if ns.start < sline < ns.end:
                 opens.append(f"{ns.kind} {ns.name}")
-        return opens
+        return list(opens)
 
     def format_theorems(self):
-        # imports = '\n'.join([f'import {imp}' for imp in file.imports])
-        imports = f"import {self.module}"
+        imports = '\n'.join([f'import {imp}' for imp in self.imports])
+        imports += f"\nimport {self.module}"
         theorems = {}
         for thm in self.tactic_theorems:
-            src = thm['source']
-            proof = re.split(r":=\s*by", src, maxsplit=1)[1]
-    
             # Get the open namespaces, and replace any declarations ('namespace') with an 'open')
             open_namespaces = '\n'.join([ns.replace('namespace', 'open') for ns in self.get_open_namespaces(thm)])
-            anonymous = re.split(r"(?:}\s+|[^,]\s+)", thm['signature'], maxsplit=1)[1]
-            statement = f"theorem generated {anonymous}"
+
+            src = thm['source']
+            signature = thm['signature']
+            proof = re.split(r":=\s*by", src, maxsplit=1)[1]
+            anonymous = re.split(r"(?:}\s+|[^,]\s+)", signature,  maxsplit=1)[1]
+            statement = f"theorem thm {anonymous}"
             theorems[thm['declName']] = f"{imports}\n\n{open_namespaces}\n\n{statement} := by\n{proof}"
         return theorems
 
@@ -183,7 +184,8 @@ if __name__ == "__main__":
         trace = TracedFile.from_file(path)
         for name, thm in trace.format_theorems().items():
             clean_name = name.replace("'", "_p")
-            output_name = Path(args.output_dir, path.with_name(f"{path.stem}-{clean_name}.lean").relative_to(args.extraction_dir))
+            clean_path = path.stem.replace("'", "_p")
+            output_name = Path(args.output_dir, path.with_name(f"{clean_path}-{clean_name}.lean").relative_to(args.extraction_dir))
             Path(output_name).parent.mkdir(parents=True, exist_ok=True)
             with open(output_name, 'w') as f:
                 f.write(thm)
