@@ -1,0 +1,8 @@
+[submodule "LeanHyperTree"]
+	path = LeanHyperTree
+	url = git@github.com:kmill/LeanHyperTree.git
+[submodule "repl"]
+	path = repl
+	url = git@github.com:offendo/repl.git
+[submodule "LeanHyperTree/"]
+	url = git@github.com:offendo/LeanHyperTree.git

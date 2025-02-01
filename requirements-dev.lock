@@ -146,6 +146,8 @@ matplotlib-inline==0.1.7
     # via ipython
 mistune==3.1.0
     # via nbconvert
+more-itertools==10.6.0
+    # via extract
 mypy-extensions==1.0.0
     # via black
 nbclient==0.10.2

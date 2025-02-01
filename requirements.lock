@@ -10,6 +10,8 @@
 #   universal: false
 
 -e file:.
+more-itertools==10.6.0
+    # via extract
 numpy==2.2.2
     # via pandas
 pandas==2.2.3
