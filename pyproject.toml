@@ -6,6 +6,8 @@ dependencies = [
     "pandas>=2.2.3",
     "tqdm>=4.67.1",
     "more-itertools>=10.6.0",
+    "datasets>=3.5.0",
+    "transformers>=4.51.3",
 ]
 readme = "README.md"
 requires-python = ">= 3.8"
